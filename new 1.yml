@@ -1,0 +1,115 @@
+- hosts: db_servers
+  become: true
+  vars:
+    patroni_version: "2.1.0"
+    postgresql_version: "14"
+    etcd_version: "3.5.13"
+    pgbackrest_version: "2.46"
+    local_rpm_path: "/PostgreSQL-Packages"
+    remote_rpm_path: "/tmp/PostgreSQL-Packages"
+
+  tasks:
+    - name: Create remote directory for RPM files
+      file:
+        path: "{{ remote_rpm_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy RPM files to remote hosts
+      copy:
+        src: "{{ local_rpm_path }}/"
+        dest: "{{ remote_rpm_path }}/"
+        mode: '0644'
+        remote_src: no
+
+    - name: Install PostgreSQL and dependencies from local RPM files
+      shell: |
+        yum localinstall -y {{ remote_rpm_path }}/postgresql14-server-14.8-1PGDG.rhel8.x86_64.rpm \
+                              {{ remote_rpm_path }}/postgresql14-contrib-14.8-1PGDG.rhel8.x86_64.rpm \
+                              {{ remote_rpm_path }}/python3-pip-23.3.2-3.el10.noarch.rpm \
+                              {{ remote_rpm_path }}/etcd-3.5.13-1.fc41.x86_64.rpm \
+                              {{ remote_rpm_path }}/patroni-2.1.0-1.sles15.x86_64.rpm
+      become: yes
+
+    - name: Initialize PostgreSQL database (only on first install)
+      command: /usr/pgsql-{{ postgresql_version }}/bin/postgresql-{{ postgresql_version }}-setup initdb
+      when: ansible_facts.packages['postgresql{{ postgresql_version }}-server'] is not defined
+
+    - name: Install pgBackRest from local RPM file
+      shell: |
+        yum localinstall -y {{ remote_rpm_path }}/pgbackrest-2.46-2.rhel7.x86_64.rpm
+
+    - name: Create PostgreSQL user for replication
+      become_user: postgres
+      postgresql_user:
+        name: replicator
+        password: P@ssw0rd
+        role_attr_flags: REPLICATION
+
+    - name: Configure Patroni
+      template:
+        src: templates/patroni.yml.j2
+        dest: /etc/patroni.yml
+
+    - name: Start Patroni service
+      systemd:
+        name: patroni
+        enabled: true
+        state: started
+
+    - name: Configure etcd
+      template:
+        src: templates/etcd.yml.j2
+        dest: /etc/etcd/etcd.conf.yml
+
+    - name: Start etcd service
+      systemd:
+        name: etcd
+        enabled: true
+        state: started
+
+    - name: Ensure PostgreSQL is running
+      systemd:
+        name: postgresql-{{ postgresql_version }}
+        enabled: true
+        state: started
+
+- hosts: load_balancer
+  become: true
+  vars:
+    local_rpm_path: "/path/to/rpms"
+    remote_rpm_path: "/tmp/rpms"
+
+  tasks:
+    - name: Create remote directory for RPM files
+      file:
+        path: "{{ remote_rpm_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy RPM files to remote hosts
+      copy:
+        src: "{{ local_rpm_path }}/"
+        dest: "{{ remote_rpm_path }}/"
+        mode: '0644'
+        remote_src: no
+
+    - name: Install HAProxy from local RPM
+      shell: |
+        yum localinstall -y {{ remote_rpm_path }}/haproxy-3.0.3-1.el10.x86_64.rpm
+      become: yes
+
+    - name: Configure HAProxy
+      template:
+        src: haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+
+    - name: Restart HAProxy
+      systemd:
+        name: haproxy
+        state: restarted
+
+    - name: Enable HAProxy at boot
+      systemd:
+        name: haproxy
+        enabled: true
